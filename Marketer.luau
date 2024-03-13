@@ -30,9 +30,11 @@ type SubscriptionDetails<T> = {
     State: Enum.SubscriptionState,
     ExpireTime: DateTime,
     NextRenewTime: T,
-} & {
+} | {
     ExpirationReason: Enum.SubscriptionExpirationReason,
     State: Enum.SubscriptionState.Expired,
+    ExpireTime: DateTime,
+    NextRenewTime: T,
 }
 
 type PeroidStruct = {
