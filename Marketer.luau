@@ -3,7 +3,7 @@
 -- Marketer
 -- a marketplace service wrapper with usd and robux subscriptions, and some asset utilities aswell
 -- @Kalrnlo
--- 07/03/2024
+-- 13/03/2024
 
 local MarketplaceService = game:GetService("MarketplaceService")
 local DatastoreService = game:GetService("DataStoreService")
@@ -26,6 +26,16 @@ type Future<T...> = {
 	Await: (self: Future<T...>) -> T...,
 }
 
+type SubscriptionDetails<T> = {
+    State: Enum.SubscriptionState,
+
+    ExpireTime: DateTime,
+    NextRenewTime: T,
+} & {
+    ExpirationReason: Enum.SubscriptionExpirationReason,
+    State: Enum.SubscriptionState.Expired,
+}
+
 type PeroidStruct = {
     Months: number,
     Years: number,
@@ -44,14 +54,20 @@ type SubscriptionHistoryEntry = {
 
 export type SubscriptionHistory = {SubscriptionHistoryEntry}
 
-export type Subscription = {
+type SubscribeMethod<T> = ((self: Subscription, Player: Player, Period: T?) -> boolean) &
+    ((self: Subscription, UserId: number, Period: T?) -> boolean)
+
+-- type for methods that are async if a userid is provided, and not if a player is provided
+type SubscriptionSyncOrAsyncMethod<T> = ((self: Subscription, Player: Player) -> T) &
+    ((self: Subscription, UserId: number) -> Future<boolean, T>),
+
+type Subscription = {
     PlayerUnsubscribed: (self: Subscription, Callback: (Player: Player, ExpirationReason: Enum.SubscriptionExpirationReason) -> ()) -> () -> (),
-    Subscribe: (self: Subscription, PlayerOrUserId: Player | number, Period: Enum.SubscriptionPeriod?) -> (),
-    GetState: (self: Subscription, PlayerOrUserId: Player | number) -> Enum.SubscriptionState,
-    GetHistory: (self: Subscription, PlayerOrUserId: Player | number) -> SubscriptionHistory,
     Prompt: (self: Subscription, Player: Player) -> Future<boolean, Enum.SubscriptionState>,
     PlayerSubscribed: (self: Subscription, Callback: (Player: Player) -> ()) -> () -> (),
-    IsSubscribed: (self: Subscription, PlayerOrUserId: Player | number) -> boolean,
+    GetState: SubscriptionSyncOrAsyncMethod<Enum.SubscriptionState>,
+    GetHistory: SubscriptionSyncOrAsyncMethod<SubscriptionHistory>,
+    IsSubscribed: SubscriptionSyncOrAsyncMethod<boolean>,
     Deactivate: (self: Subscription) -> (),
     Activate: (self: Subscription) -> (),
 
@@ -65,19 +81,21 @@ export type Subscription = {
 }
 
 export type TieredSubscription = Subscription & ({
+    GetDetails: SubscriptionSyncOrAsyncMethod<SubscriptionDetails<DateTime?>>,
+    Subscribe: SubscribeMethod<Period>,
 	Peroids: {
 		({
 			DisplayPeriod: string,
 			DisplayPrice: string,
+            Type: "Robux",
 			ProductId: number,
 			Peroid: Peroid,
-			TierType: "Robux",
-        	} | {
+        } | {
 			Peroid: Enum.SubscriptionPeriod,
 			SubscriptionId: string,
 			DisplayPeriod: string,
 			DisplayPrice: string,
-			TierType: "USD",
+			Type: "USD",
 		} | {
 			Peroid: Enum.SubscriptionPeriod,
 			RobuxDisplayPrice: string,
@@ -85,37 +103,41 @@ export type TieredSubscription = Subscription & ({
 			SubscriptionId: string,
 			DisplayPeriod: string,
 			ProductId: number,
-			TierType: "Dual",
+			Type: "Dual",
 		})
 	}
 })
 
-export type TierType = SubscriptionType
-
 export type RobuxSubscription = Subscription & {
-	SubscriptionType: "Robux",
+    GetDetails: SubscriptionSyncOrAsyncMethod<SubscriptionDetails<nil>>,
+    Subscribe: SubscribeMethod<Period>,
 	DisplayPeriod: string,
 	DisplayPrice: string,
 	ProductId: number,
 	Peroid: Peroid,
+    Type: "Robux",
 }
 
 export type USDSubscription = Subscription & {
+    GetDetails: SubscriptionSyncOrAsyncMethod<SubscriptionDetails<DateTime>>,
+    Subscribe: SubscribeMethod<Enum.SubscriptionPeriod>,
 	Peroid: Enum.SubscriptionPeriod,
-	SubscriptionType: "USD",
 	SubscriptionId: string,
 	DisplayPeriod: string,
 	DisplayPrice: string,
+    Type: "USD",
 } 
 
 export type DualSubscription = Subscription & {
+    GetDetails: SubscriptionSyncOrAsyncMethod<SubscriptionDetails<DateTime?>>,
+    Subscribe: SubscribeMethod<Enum.SubscriptionPeriod>,
 	Peroid: Enum.SubscriptionPeriod,
 	RobuxDisplayPrice: string,
-	SubscriptionType: "Dual",
 	USDDisplayPrice: string,
 	SubscriptionId: string,
 	DisplayPeriod: string,
 	ProductId: number,
+    Type: "Dual",
 }
 
 type ReciptInfo = {
@@ -140,7 +162,6 @@ type Config = {
 }
 
 type ProductCallback = (Player: Player, PurchaseId: number, Recipt: Recipt) -> boolean
-type GamepassCallback = (Player: Player) -> ()
 
 -- Any table with Player prefixing its name uses UserIds as keys
 local ProductToSubscriptionMap = {} :: {[number]: RobuxSubscription | DualSubscription}
@@ -165,8 +186,7 @@ local Config = {
 
 local SubscriptionPaymentStatusToNumber = {
     [Enum.SubscriptionPaymentStatus.Refunded] = 1,
-    [Enum.SubscriptionPaymentStatus.Paid] = 2,
-    Robux = 0,
+    [Enum.SubscriptionPaymentStatus.Paid] = 0,
 }
 local SubscriptionTypeEnum = {
     Robux = 1,
@@ -246,10 +266,15 @@ local function PackDate(Day: number, Month: number, Year: number)
     return bit32.bor(bit32.lshift(Year, 9), bit32.lshift(Month, 5), Day)
 end
 
-local function UnpackDate(u32Date: number)
-	return bit32.band(u32Date, 0x1F),
-		bit32.band(bit32.rshift(u32Date, 5), 0xF),
-		bit32.rshift(u32Date, 9)
+local function DateTimeToDate(DT: DateTime)
+    local UniversalTime = DT:ToUniversalTime()
+    return UniversalTime.Day, UniversalTime.Month, UniversalTime.Year
+end
+
+local function UnpackDate(u24Date: number)
+	return bit32.band(u24Date, 0x1F),
+		bit32.band(bit32.rshift(u24Date, 5), 0xF),
+		bit32.rshift(u24Date, 9)
 end
 
 local function SwapRemove<T>(Array: {T}, Index: number)
@@ -300,9 +325,13 @@ local function OnPlayerAdded(Player: Player)
 
     for _, Thread in ThreadsWaitingForPlayer do
         if Player:IsDescendantOf(Players) then
-            task.spawn(Thread, true)
+            if coroutine.status(Thread) == "suspended" then
+                task.spawn(Thread, true)
+            end
         else
-            task.spawn(Thread, false)
+            if coroutine.status(Thread) == "suspended" then
+                task.spawn(Thread, false)
+            end
         end
     end
 
@@ -314,7 +343,9 @@ local function OnPlayerRemoving(Player: Player)
 
     if ThreadsWaitingForPlayer and #ThreadsWaitingForPlayer ~= 0 then
         for _, Thread in ThreadsWaitingForPlayer do
-            task.spawn(Thread, false)
+            if coroutine.status(Thread) == "suspended" then
+                task.spawn(Thread, false)
+            end
         end
     end
 
@@ -456,20 +487,70 @@ local function Subscription_Base_PlayerSubscribed(self: BaseSubscription, Callba
 
 end
 
-local function Subscription_Base_IsSubscribed(self: BaseSubscription, PlayerOrUserId: Player | number)
+local function Subscription_Base_IsSubscribed(self: BaseSubscription, PlayerOrUserId: Player | number): any
     if typeof(PlayerOrUserId) == "Instance" then
         return table.find(self.Subscribers, PlayerOrUserId) ~= nil
     else
-
+        return Future.Try(function(self: BaseSubscription, UserId: number)
+            local Sucess, Buffer = Datastore:GetAsync(string.format(Config.SubscriptionKeyFormat, UserId))
+            
+            if Sucess then
+                for Index = 0, 20 * 50, 20 do
+                   if buffer.readstring(Buffer, Index, 20) == self.Name then
+                        return true
+                   end
+                end
+            else
+                warn(`[Marketer] Datastore error happened with IsSubscribed for Subscription {self.Name}\n\tMessage: {Buffer}`)
+            end
+    
+            return false
+        end, self, PlayerOrUserId)
     end
 end
 
 local function Subscription_Base_GetHistory(self: BaseSubscription, PlayerOrUserId: Player | number)
-
+    if typeof(PlayerOrUserId) == "Instance" then
+        return table.find(self.Subscribers, PlayerOrUserId) ~= nil
+    else
+        return Future.Try(function(self: BaseSubscription, UserId: number)
+            local Sucess, Buffer = Datastore:GetAsync(string.format(Config.SubscriptionKeyFormat, UserId))
+            
+            if Sucess then
+                for Index = 0, 20 * 50, 20 do
+                   if buffer.readstring(Buffer, Index, 20) == self.Name then
+                        return true
+                   end
+                end
+            else
+                warn(`[Marketer] Datastore error happened with IsSubscribed for Subscription {self.Name}\n\tMessage: {Buffer}`)
+            end
+    
+            return false
+        end, self, PlayerOrUserId)
+    end
 end
 
 local function Subscription_Base_GetState(self: BaseSubscription, PlayerOrUserId: Player | number)
-
+    if typeof(PlayerOrUserId) == "Instance" then
+        return table.find(self.Subscribers, PlayerOrUserId) ~= nil
+    else
+        return Future.Try(function(self: BaseSubscription, UserId: number)
+            local Sucess, Buffer = Datastore:GetAsync(string.format(Config.SubscriptionKeyFormat, UserId))
+            
+            if Sucess then
+                for Index = 0, 20 * 50, 20 do
+                   if buffer.readstring(Buffer, Index, 20) == self.Name then
+                        return true
+                   end
+                end
+            else
+                warn(`[Marketer] Datastore error happened with IsSubscribed for Subscription {self.Name}\n\tMessage: {Buffer}`)
+            end
+    
+            return false
+        end, self, PlayerOrUserId)
+    end
 end
 
 local RobuxSubscription = {
@@ -478,7 +559,7 @@ local RobuxSubscription = {
 	IsSubscribed = Subscription_Base_IsSubscribed,	
 	GetHistory = Subscription_Base_GetHistory,	
 	GetState = Subscription_Base_GetState,
-    __type = "RobuxSubscription",
+    SubscriptionType = "Robux",
 }
 RobuxSubscription.__index = RobuxSubscription
 table.freeze(RobuxSubscription)
@@ -489,7 +570,7 @@ local DualSubscription = {
 	IsSubscribed = Subscription_Base_IsSubscribed,	
 	GetHistory = Subscription_Base_GetHistory,	
 	GetState = Subscription_Base_GetState,
-    __type = "DualSubscription",
+    SubscriptionType = "Dual",
 }
 DualSubscription.__index = DualSubscription
 table.freeze(DualSubscription)
@@ -500,7 +581,7 @@ local USDSubscription = {
 	IsSubscribed = Subscription_Base_IsSubscribed,	
 	GetHistory = Subscription_Base_GetHistory,	
 	GetState = Subscription_Base_GetState,
-    __type = "USDSubscription",
+    SubscriptionType = "USD",
 }
 USDSubscription.__index = USDSubscription
 table.freeze(USDSubscription)
@@ -657,9 +738,9 @@ local Exports = table.freeze {
 
     Subscription = table.freeze {
         Robux = GetOrCreateRobuxSubscription,
-    	Dual = GetOrCreateDualSubscription,
+        Dual = GetOrCreateDualSubscription,
         USD = GetOrCreateUSDSubscription,
-	Tiered = nil,
+        Tiered = nil,
     },
 }
 
