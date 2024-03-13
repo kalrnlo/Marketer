@@ -28,7 +28,6 @@ type Future<T...> = {
 
 type SubscriptionDetails<T> = {
     State: Enum.SubscriptionState,
-
     ExpireTime: DateTime,
     NextRenewTime: T,
 } & {
