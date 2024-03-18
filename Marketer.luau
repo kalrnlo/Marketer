@@ -172,6 +172,7 @@ local ProductCallbacks = {} :: {[number]: ProductCallback}
 local IsServer = game:GetService("RunService"):IsServer()
 local PlayerSubscriptions = {} :: {[number]: {string}}
 local PlayerWriteQueues = {} :: {[number]: {thread}}
+local DoesPlayerHaveUpdaterRunning = {[number]: boolean}
 local PlayerGamepasses = {} :: {[number]: {number}}
 local PlayersLoading = {} :: {[number]: {thread}}
 local Datastore: DataStore
@@ -284,6 +285,22 @@ local function SwapRemove<T>(Array: {T}, Index: number)
         Array[#Array] = nil
     else
         Array[Index] = nil
+    end
+end
+
+local function UpdatePlayerSubscriptions(Player: Player, Callback: (Data: buffer) -> ())
+    local WriteQueue = PlayerWriteQueues[Player.UserId]
+    local PlayerSubscriptionData = 
+    table.insert(WriteQueue, Callback)
+
+    for _, UpdateCallback in WriteQueue do
+
+    end
+
+    if #WriteQueue > 0 then
+        table.insert(WriteQueue, Callback)
+    else
+
     end
 end
 
